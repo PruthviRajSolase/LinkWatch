@@ -1,227 +1,212 @@
-<div align="center">
+Gemma Exit
 
-# 🔭 linkwatch
+Gemma 4 Dependency Resilience Agent: a command-line tool that scans a Python repository's dependencies, asks Gemma 4 what to do with each one, tests the baseline and the proposed replacements in disposable copies, and writes an evidence-labelled report called a Dependency Exit Capsule.
 
-**Keep an eye on your websites from the terminal.**
+Version 0.4.0 · Target repository used in development: LinkWatch
 
-A small, friendly link & uptime checker: list your sites in one file, run one command,
-and get a live status table plus a clean HTML status page you can host anywhere.
+1. Problem and solution overview
 
-![Python](https://img.shields.io/badge/python-3.12-3776AB?logo=python&logoColor=white)
-![Interface](https://img.shields.io/badge/interface-CLI-4B4B4B?logo=gnubash&logoColor=white)
-![Docker](https://img.shields.io/badge/docker-ready-2496ED?logo=docker&logoColor=white)
-![License](https://img.shields.io/badge/license-MIT-green)
+Problem. Dependencies decay quietly. Packages become unmaintained, get pinned to old versions, conflict between manifests, or are used through private APIs that make them hard to replace. Finding CVEs does not answer the harder questions: which dependencies are fragile, what could replace them, and is there any evidence that a replacement works?
 
-[Quick start](#-quick-start) •
-[Usage](#-usage) •
-[Configuration](#%EF%B8%8F-configuration) •
-[How it works](#-how-it-works) •
-[Tests](#-running-the-tests)
+Solution. Gemma Exit builds a Dependency Exit Capsule (artifacts/capsule.json and artifacts/capsule.md). It first collects facts without running the project's code, then runs the project's own test suite to get a real baseline, and only then asks Gemma 4 for a per-dependency recommendation (retain, replace, remove or investigate) grounded in that evidence. Replacements are tried in disposable copies and compared with the baseline.
 
-</div>
+Every claim in the capsule carries one label, so a reader can see how it is known:
 
----
+Label	Meaning
+observed	read directly from the repository or a registry, or recorded by deterministic code
+verified	an executed command whose outcome was recorded (this does not prove a migration is correct)
+ai_recommendation	Gemma's judgement; advisory until confirmed by an executed run
+unverified	a claim with no supporting evidence yet
 
-## ✨ Features
+Honesty rules enforced in code: only the two documented Gemma 4 model IDs can be called and Gemini or any other model is never substituted; a mock is always labelled (MOCK); a test is reported as passed only if it ran; API failures, blocked validation and inconclusive comparisons are reported as such and never filled in.
 
-- 📋 **One config file**: list every site you care about in `sites.toml`
-- ⚡ **Live terminal table**: watch results fill in as each site is checked
-- 🟢 **Clear status**: UP/DOWN, HTTP status code, response time and page title
-- 🕒 **Last-Modified tracking**: see when a page was last updated (when the server reports it)
-- 💾 **Cached results**: the last run is saved, so you can build reports any time
-- 🌐 **HTML status page**: one command turns your results into a shareable `status.html`
-- 🐳 **Docker ready**: run everything without touching your local Python
+Observed on LinkWatch (static scan and executed baseline, not model output):
 
----
+pydantic is >=2 in pyproject.toml:17 but ==1.10.13 in requirements.txt:5.
+certifi is imported in linkwatch/checker.py but declared in no manifest.
+setuptools is used through import pkg_resources.
+The baseline test run fails on Python 3.13 with ImportError: cannot import name 'soft_unicode' from 'markupsafe' (Jinja2==2.11.3 with an unpinned MarkupSafe that resolves to 3.0.4). Result counts from the executed run: 1 failed, 9 passed.
+2. Setup instructions
 
-## 🖥️ Preview
+Written for Windows with PowerShell and VS Code. Validation needs Python 3.13 or 3.12 (check with py -0); Python 3.14 is rejected for validation by design.
 
-```text
-$ python -m linkwatch.cli check
-                                    My sites
-┏━━━━━━━━━┳━━━━━━━━┳━━━━━━┳━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
-┃ Site    ┃ Status ┃ Code ┃   Time ┃ Title                           ┃
-┡━━━━━━━━━╇━━━━━━━━╇━━━━━━╇━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┩
-│ Python  │ UP     │  200 │ 113 ms │ Welcome to Python.org           │
-│ PyPI    │ UP     │  200 │  59 ms │ PyPI · The Python Package Index │
-│ Example │ UP     │  200 │ 204 ms │ Example Domain                  │
-│ GitHub  │ UP     │  200 │ 236 ms │ GitHub                          │
-└─────────┴────────┴──────┴────────┴─────────────────────────────────┘
-4/4 sites up, results saved to ~/.cache/linkwatch/results.json
-```
+powershell
+# 1. Put the target repo next to this folder
+git clone https://github.com/rishrek/LinkWatch ..\LinkWatch
 
----
+# 2. A venv containing LinkWatch's own dependencies (used by the metadata scan)
+py -3.13 -m venv ..\lw-venv
+..\lw-venv\Scripts\python -m pip install -r ..\LinkWatch\requirements.txt -r ..\LinkWatch\requirements-dev.txt
 
-## 🚀 Quick start
+# 3. A venv for Gemma Exit itself, then run its tests
+py -3.13 -m venv .venv
+.venv\Scripts\python -m pip install -r requirements.txt
+.venv\Scripts\python -m pytest -q
 
-You only need **one** of the two options below.
+# 4. Create your settings file
+copy .env.example .env
 
-### Option A: Docker (no Python setup needed)
+Open .env and set:
 
-```bash
-git clone https://github.com/rishrek/linkwatch.git
-cd linkwatch
-make docker-build
-docker run --rm -it linkwatch python -m linkwatch.cli check
-```
+GEMINI_API_KEY=your_key_here
+# optional
+GEMMA_MODEL=gemma-4-31b-it
+GITHUB_TOKEN=your_token_here
 
-### Option B: Local Python 3.12
+Create the API key in Google AI Studio. Never commit or share .env; it is git-ignored. GITHUB_TOKEN is optional and raises the GitHub rate limit used by the metadata scan from 60 to a higher number of requests per hour.
 
-```bash
-git clone https://github.com/rishrek/linkwatch.git
-cd linkwatch
-make setup                    # creates .venv and installs everything (one time)
-source .venv/bin/activate     # do this in every new terminal
-python -m linkwatch.cli check
-```
+Expected test result on Windows: 62 passed, 1 skipped (the skipped test is a POSIX-only symlink check). All tests are offline and use mocks; none calls the real API.
 
-<details>
-<summary><b>On Windows, or without <code>make</code>?</b></summary>
+3. Usage instructions
 
-```powershell
-py -3.12 -m venv .venv
-.venv\Scripts\activate
-pip install -r requirements.txt -r requirements-dev.txt
-python -m linkwatch.cli check
-```
+Full pipeline (scan, metadata, baseline, Gemma analysis, candidate validation, capsule):
 
-If your Python 3.12 has a different name on macOS/Linux, pass it to make:
-`make setup PYTHON=/path/to/python3.12`
+powershell
+.venv\Scripts\python main.py run --repo ..\LinkWatch --metadata-python ..\lw-venv\Scripts\python.exe
 
-</details>
+A run takes several minutes: one Gemma call per dependency, plus a fresh virtual environment and full test run for the baseline and for each replace candidate. Output goes to artifacts\; open artifacts\capsule.md.
 
----
+If some Gemma calls fail with transient 500 INTERNAL errors, ask again only for the failed or changed dependencies:
 
-## 📖 Usage
+powershell
+.venv\Scripts\python main.py run --repo ..\LinkWatch --metadata-python ..\lw-venv\Scripts\python.exe --resume
+# optionally allow the other documented Gemma 4 model to answer after API failures
+.venv\Scripts\python main.py run ... --resume --fallback-model gemma-4-26b-a4b-it
+Commands
+Command	What it does
+inspect	static scan (and metadata scan if enabled); no model, no validation
+analyse	scan, then Gemma analysis
+validate	scan, baseline validation, and candidate validation if recommendations exist
+capsule	scan, analysis, and write the capsule
+run	everything above in order
+Options
+Option	Purpose
+--repo PATH	repository to analyse (default ../LinkWatch)
+--model	gemma-4-31b-it (default) or gemma-4-26b-a4b-it; also settable via GEMMA_MODEL
+--python PATH	Python 3.12/3.13 for validation. Optional: it is auto-detected, including through the Windows py launcher. If given, use the real path with no < > brackets; the path and version are checked before anything else runs
+--metadata-python PATH	python.exe of a venv that has the repo's dependencies installed; enables the PyPI/GitHub metadata scan
+--usage-json PATH	optional usage-analysis JSON for the metadata scan
+--skip-validation	do not run baseline or candidate validation
+--resume	reuse successful answers from artifacts/recommendations.json only when the evidence sent to the model is identical
+--fallback-model	explicit second Gemma 4 model, tried only when the primary model's API keeps failing; the model that answered is recorded
+--timeout SECONDS	per-step timeout (default 600)
+Outputs (artifacts/)
 
-| Command | What it does |
-|---------|--------------|
-| `python -m linkwatch.cli check` | Checks every site, shows the live table and saves the results |
-| `python -m linkwatch.cli report` | Builds `status.html` from the last saved results |
-| `python -m linkwatch.cli info` | Shows where the templates and cached results live |
-| `python -m linkwatch.cli --help` | Lists all commands and options |
+scan.json, metadata_scan.json, baseline.json, recommendations.json, capsule.json, capsule.md. If validation cannot run, the capsule says blocked; if there is no API key, it says the AI stage was not run.
 
-### Options
+4. Architecture
+            +------------------+      +----------------------+
+ repo  ---> | scanner.py       | ---> |                      |
+ (read-     | static: manifests|      |                      |
+  only)     | imports, conflicts      |   ScanResult         |
+            +------------------+      |   (Dependency list)  |
+            +------------------+      |                      |
+            | enrichment.py -> | ---> |                      |
+            | metadata_scanner |      +----------+-----------+
+            | PyPI/GitHub facts|                 |
+            +------------------+                 v
+            +------------------+      +----------------------+
+ temp copy> | validator.py     | ---> | baseline ValidationRun| (venv, pip, full pytest)
+            +------------------+      +----------+-----------+
+                                                 | failure signature + test counts
+                                                 v
+            +------------------+      +----------------------+
+            | gemma_client.py  | <--- | analyzer.py          | one call per dependency,
+            | google-genai     |      | strict JSON checks   | retries, resume, fallback
+            +------------------+      +----------+-----------+
+                                                 | replace recommendations
+                                                 v
+                                      +----------------------+
+                                      | validator.py          | candidate runs in fresh
+                                      | (candidates)          | copies, compared to baseline
+                                      +----------+-----------+
+                                                 v
+                                      +----------------------+
+                                      | capsule.py            | capsule.json + capsule.md
+                                      +----------------------+
+Module	Role
+main.py	CLI, argument checks, progress output
+src/models.py	shared data classes (Dependency, Recommendation, ValidationRun, ...)
+src/scanner.py	static, read-only scan of requirements files, pyproject.toml (PEP 621 and Poetry), setup.cfg, setup.py literals, Pipfile and lock files; line references, constraint conflicts, import evidence
+src/metadata_scanner.py	teammate's registry/GitHub scanner (PyPI, GitHub, pip check, installed metadata, undeclared imports); kept unmodified
+src/enrichment.py	thin adapter: runs the metadata scanner read-only, merges its facts into the scan, records disagreements instead of overriding either side, summarises lookup failures
+src/gemma_client.py	Gemma 4 access through google-genai; allows only the two documented model IDs; key from the environment only
+src/analyzer.py	builds the evidence prompt, validates the JSON answer, retries, resume, optional fallback, rejects a package proposed as its own replacement
+src/validator.py	disposable-copy validation with fixed command templates and timeouts; Python 3.12/3.13 only; baseline and candidates run the same commands
+src/capsule.py	builds and writes the labelled capsule (JSON and Markdown)
+schemas/evidence_schema.json	schema for evidence records
+tests/	offline tests with a mocked model
 
-| Command | Option | Default | Description |
-|---------|--------|---------|-------------|
-| `check` | `--config PATH` | `sites.toml` | Use a different sites file |
-| `report` | `-o, --output PATH` | `status.html` | Where to write the HTML page |
-| `report` | `--title TEXT` | `linkwatch` | Heading shown on the status page |
+Design decisions are recorded in DECISIONS.md.
 
-### A typical session
+5. Dependencies
 
-```bash
-python -m linkwatch.cli check                     # 1. check your sites
-python -m linkwatch.cli report -o status.html     # 2. build the status page
-open status.html                                  # 3. view it (xdg-open on Linux)
-```
+Python packages for Gemma Exit (requirements.txt):
 
----
+Package	Used for
+google-genai >= 1.0	calling Gemma 4 through the Gemini API
+packaging >= 23.0	version and requirement parsing (scanner and metadata scanner)
+pytest >= 8.0	the project's own offline tests
 
-## ⚙️ Configuration
+Everything else is the Python standard library.
 
-All sites live in **`sites.toml`** in the project folder:
+Environment requirements
 
-```toml
-title = "My sites"
+Python 3.13 or 3.12 for validation (Windows py launcher supported). The tool itself runs in the venv you created in step 3.
+git, to clone the target repository.
+Network access to pypi.org, api.github.com and the Gemini API (generativelanguage.googleapis.com).
+A Gemini API key (required for the AI stage) and optionally a GitHub token.
 
-[[sites]]
-name = "Python"
-url = "https://www.python.org"
+Not dependencies of Gemma Exit: the packages of the repository being analysed (LinkWatch's requirements.txt and requirements-dev.txt). They are installed into ..\lw-venv for the metadata scan and into throwaway virtual environments for validation.
 
-[[sites]]
-name = "Example"
-url = "https://example.com"
-```
+6. AI model details
+Field	Details
+Model name	Gemma 4 (Google). Default model: gemma-4-31b-it. Optional second model: gemma-4-26b-a4b-it
+Model version	The Gemma 4 generation, identified by the model ID sent to the API (gemma-4-31b-it or gemma-4-26b-a4b-it). No other model or version can be called: the client raises an error for any other ID. The Gemma 4 model card is at https://ai.google.dev/gemma/docs/core/model_card_4
+Model source	Google (Gemma open models, https://ai.google.dev/gemma). Hosted by Google through the Gemini API; model weights are not downloaded or self-hosted by this project
+Access method	Gemini API through the official google-genai Python SDK: genai.Client(api_key=...) and client.models.generate_content(...) with the model ID, a system instruction and temperature 0.2. The key is read only from the GEMINI_API_KEY environment variable or .env. Documented route: https://ai.google.dev/gemma/docs/core/gemma_on_gemini_api
+License and usage terms	Google lists Gemma 4 under its Apache 2.0 "Gemma 4 license" (https://ai.google.dev/gemma/apache_2) alongside the Gemma Terms of Use (https://ai.google.dev/gemma/terms) and the Prohibited Use Policy (https://ai.google.dev/gemma/prohibited_use_policy); see also the Intended Use Statement (https://ai.google.dev/gemma/intended_use_statement). The Gemma documentation pages were checked on 2026-10-15 (page last updated 2026-07-02); confirm the current terms at those links before redistributing. Use through the Gemini API is also subject to the terms that apply to the Google AI Studio account that created the key
+Role in the project	Gemma 4 is the analysis step. For each scanned dependency it receives structured evidence (declarations, usage with file and line, registry/GitHub metadata, the other dependencies, and the executed baseline's failure signature with test counts) and returns one JSON object: recommendation, confidence, rationale, replacement candidate and import name, migration steps, required tests, compatibility risks, evidence gaps and evidence references. Its output is labelled ai_recommendation and is never treated as proof. It cannot run commands or install packages; executed validation is done separately by deterministic code
 
-| Key | Required | Description |
-|-----|----------|-------------|
-| `title` | no | Heading shown above the terminal table |
-| `[[sites]]` | yes | One block per site you want to check |
-| `name` | yes | Short label for the site |
-| `url` | yes | Full address, must start with `http://` or `https://` |
+How the model is constrained:
 
-To add a site, copy a `[[sites]]` block and change the name and URL.
+The evidence is passed as untrusted data, and the system prompt forbids inventing versions, compatibility guarantees or support statements; unknowns must be listed under evidence_gaps.
+Output must be one JSON object. It is validated locally (allowed values, valid package names, replace requires a candidate, a package cannot replace itself). Invalid output gets one retry, then is reported as an error.
+API errors are retried four times with backoff. Failures are written to the capsule as failures.
+The model that produced each recommendation is stored (model_id) and listed in the capsule (models_used).
+No thinking level or JSON-mode setting is configured, so API defaults apply.
+7. Known limitations
 
-### Where results are stored
+About the model
 
-| System | Location |
-|--------|----------|
-| macOS | `~/Library/Caches/linkwatch/results.json` |
-| Linux | `~/.cache/linkwatch/results.json` |
-| Windows | `%LOCALAPPDATA%\linkwatch\linkwatch\Cache\results.json` |
+The Gemma API returned intermittent 500 INTERNAL errors in our runs. Jinja2 failed repeatedly after retries while other dependencies succeeded; we have not identified why. Failed dependencies are reported as failed in the capsule. --resume and the explicit --fallback-model reduce but do not remove this.
+Recommendations are advisory. The verified label means a command ran and its outcome was recorded, not that a migration is correct.
+JSON is enforced by prompt and local validation only.
+Model output can vary between runs.
 
-Set the `LINKWATCH_CACHE_DIR` environment variable to keep results somewhere else.
+About validation
 
----
+Candidate validation swaps one requirements line (version dropped). It does not rewrite imports or bump versions, so "same package, newer version" changes (for example Jinja2 or pydantic) cannot yet be validated.
+On LinkWatch the baseline itself fails (Jinja2/MarkupSafe). A candidate that leaves that failure in place produces the same failure, so such comparisons are reported INCONCLUSIVE rather than as evidence for or against the candidate.
+Validation covers pytest-based repositories with requirements*.txt manifests; other manifest types are reported blocked rather than guessed.
+Only Python 3.12 and 3.13 are used for validation.
+Validation is slow by design (fresh environment per run).
 
-## 🧠 How it works
+About the scans
 
-```mermaid
-flowchart LR
-    A["sites.toml"] -->|"check"| B["Live table in terminal"]
-    A -->|"check"| C[("results.json cache")]
-    C -->|"report"| D["status.html"]
-```
+Static usage evidence misses dynamic imports, plugins and entry points; appears_unused always carries that caveat.
+The metadata scan is only as accurate as the target venv: a dependency that is not installed there can be reported as unused (disagreements with the static scan are recorded in the capsule).
+GitHub allows 60 unauthenticated requests per hour; set GITHUB_TOKEN for more. In an early run 14 of 15 lookups failed for a cause we did not confirm; a later run had none.
+The teammate's metadata scanner has known issues that were not changed because it is their file: it follows a symlinked venv interpreter to the base Python on Linux/macOS (the adapter refuses such interpreters), hardcodes the source roots linkwatch and tests, aborts on any unparsable requirement line, and can write a cache into the scanned repository when caching is on (the adapter turns it off).
 
-1. **Load**: `sites.toml` is read and validated (every site needs a name and a valid URL).
-2. **Check**: each site gets an HTTP GET request, and linkwatch records the status code, response time, page title and `Last-Modified` header.
-3. **Save**: results are written as JSON to your cache folder.
-4. **Report**: the saved results are rendered into a standalone HTML page with a summary of what's up and what's down.
+About testing and scope
 
-### Project structure
+Development and live testing used one target repository (LinkWatch) on Windows. The 63 automated tests are offline and use mocks.
+Nothing is guaranteed about other repositories, languages or test runners.
+Project files
 
-```text
-linkwatch/
-├── linkwatch/
-│   ├── cli.py            # commands: check, report, info
-│   ├── config.py         # reads and validates sites.toml
-│   ├── checker.py        # visits each site and collects results
-│   ├── encoding.py       # page charset detection and title extraction
-│   ├── dates.py          # Last-Modified parsing
-│   ├── http_patch.py     # default request headers
-│   ├── cache.py          # saves and loads results.json
-│   ├── report.py         # builds the HTML status page
-│   ├── resources.py      # locates the bundled templates
-│   └── templates/
-│       └── status.html.j2
-├── tests/                # pytest suite with a tiny local test server
-├── sites.toml            # your list of sites
-├── requirements.txt      # app dependencies
-├── requirements-dev.txt  # test dependencies
-├── Dockerfile
-└── Makefile
-```
+main.py · src/ · tests/ · schemas/ · README.md · DEMO.md (demo script) · SUBMISSION.md (submission text) · DECISIONS.md · CHANGELOG.md · HANDOVER.md · PROJECT_STATE.md · TASKS.md
 
----
+Security
 
-## 🧪 Running the tests
-
-The tests start a tiny local web server, so they don't depend on real websites.
-
-```bash
-make test            # locally (activate .venv first)
-make docker-test     # inside Docker (run make docker-build first)
-```
-
-### Make targets
-
-| Target | Description |
-|--------|-------------|
-| `make setup` | Create `.venv` and install all dependencies |
-| `make test` | Run the pytest suite |
-| `make test-nose` | Run the suite with nose |
-| `make docker-build` | Build the Docker image |
-| `make docker-test` | Run the tests inside Docker |
-
----
-
-## 🤝 Contributing
-
-Ideas, bug reports and pull requests are welcome. Fork the repo, create a branch,
-and open a PR. Please run `make test` before submitting.
-
-## 📄 License
-
-Released under the [MIT License](LICENSE).
+The API key is read only from the environment or .env. Never paste it into chats, commits or screenshots. If a key was ever exposed, delete it in Google AI Studio and create a new one.
